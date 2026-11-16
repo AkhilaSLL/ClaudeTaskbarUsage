@@ -9,7 +9,7 @@ if (-not (Test-Path $build)) { New-Item -ItemType Directory -Path $build | Out-N
 
 $cflags = @('-std=c11', '-Wall', '-Wextra', '-Werror', '-Os', '-municode', '-DUNICODE', '-D_UNICODE',
             '-D_WIN32_WINNT=0x0A00', '-DWINVER=0x0A00')
-$dataSrc = @('json.c', 'usage.c', 'engine.c', 'ext.c', 'logo.c') | ForEach-Object { Join-Path $src $_ }
+$dataSrc = @('json.c', 'usage.c', 'engine.c', 'ext.c', 'logo.c', 'renew.c') | ForEach-Object { Join-Path $src $_ }
 
 function Invoke-Tool([string]$exe, [string[]]$toolArgs) {
     Write-Host ">" $exe ($toolArgs -join ' ')

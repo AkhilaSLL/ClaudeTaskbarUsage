@@ -53,12 +53,22 @@ starts it. `uninstall.ps1` stops it and removes the `Run` value and the install 
 ## Data rules
 
 1. Credentials: `%USERPROFILE%\.claude\.credentials.json`, `claudeAiOauth.accessToken` and
-   `expiresAt` (epoch ms). Read only, re-read before each request. The token is never refreshed,
-   logged, printed or stored; buffers that held it are wiped.
-2. Token expired, file missing or HTTP 401: no request, last data dimmed, tooltip
-   "Login expired. Open Claude Code to renew it."; next try at the next interval. While this note
-   shows, the widget checks the modified time of the credentials file every 5 s. When the file
-   changed, it tries again at once (rule 5 and the 429 backoff still apply).
+   `expiresAt` (epoch ms). Read only, re-read before each request. The widget never writes this
+   file. The token and the refresh token are never logged, printed or stored; buffers that held
+   the token are wiped.
+2. Token expired (the file exists): the widget lets the Claude CLI renew the login. It starts
+   `%USERPROFILE%\.local\bin\claude.exe mcp list` (else `claude.exe` found on the search path)
+   hidden, without the `CLAUDE*` and `ANTHROPIC*` environment variables, in the data folder, and
+   waits at most 60 s ("Exit" ends it at once). The CLI renews the file; the widget reads it again
+   and sends its request in the same step. At most one renewal per 30 minutes; "Refresh now"
+   ignores the 30 minutes, not rule 5 or the 429 backoff. Side effect: `mcp list` connects once to
+   each configured MCP server (about 20 s, about three times a day). `claude.exe auth status`
+   does not renew the file. Without `claude.exe` there is no renewal.
+   Still expired after the renewal, file missing or HTTP 401 (no renewal for these two): no
+   request, last data dimmed, tooltip "Login expired. Open Claude Code to renew it."; next try at
+   the next interval. While this note shows, the widget checks the modified time of the
+   credentials file every 5 s. When the file changed, it tries again at once (rule 5 and the 429
+   backoff still apply).
 3. Request: `GET https://api.anthropic.com/api/oauth/usage` with `Authorization: Bearer ...`,
    `anthropic-beta: oauth-2025-04-20`, `Content-Type: application/json`,
    User-Agent `ClaudeTaskbarUsage/1.0`. WinHTTP, certificate checks on, redirects off (the token
@@ -121,6 +131,12 @@ starts it. `uninstall.ps1` stops it and removes the `Run` value and the install 
 - `CTU_SAMPLE=<path to a sample answer>`: the sample file replaces the network step (no token, no
   Claude Code cache, `last.json` read but not written). `CTU_SAMPLE_STATUS=<code>` sets the HTTP
   status of the sample (for example 429 or 401). Samples: `tests\samples\`.
+- `CTU_CRED_FILE=<path>`: this file replaces `%USERPROFILE%\.claude\.credentials.json`. In sample
+  mode with `CTU_CRED_FILE` set, the credential check and the renewal run; the sample file still
+  replaces the network step. In sample mode without it: no credential check, no renewal.
+- `CTU_RENEW_CMD=<command line>`: replaces `claude.exe mcp list` of data rule 2 (still hidden, with
+  the filtered environment, the job object and the 60 s limit). `CTU_RENEW_CMD=off`: no renewal.
+  Example: `cmd.exe /c copy /y <valid invented file> <CTU_CRED_FILE>`.
 - `CTU_THEME=light|dark`: overrides the taskbar theme (the registry is not touched).
 - `CTU_TEXT=gdi`: draws the text with the GDI fallback instead of DirectWrite (see "Text").
 - `CTU_MODE=popup`: uses the fallback placement (topmost popup) instead of the taskbar child window.

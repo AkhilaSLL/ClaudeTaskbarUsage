@@ -90,6 +90,7 @@ void engine_init(ctu_engine *e, int interval_min)
     e->ext_seen_lbl_mtime = -1;
     e->login_cred_mtime = -1;
     e->login_seen_mtime = -1;
+    e->last_renew_ms = -1;
     e->use_cc_cache = 1;
     e->live_source = SRC_LIVE;
 }
@@ -446,6 +447,19 @@ int engine_step(ctu_engine *e, long long now_ms, int force)
         char *cred = ctu_read_file(e->cred_path, &len, NULL);
         int rc = ctu_cred_check(cred, len, now_ms, token, sizeof(token));
         free_secure(cred, len);
+        /* Expired token in an existing file (not a missing or unreadable one): renew it through the hook, at
+         * most once per CTU_RENEW_GAP_MS ("Refresh now" ignores the gap), then read the file once more. */
+        if (rc == CRED_EXPIRED && e->renew &&
+            (force || e->last_renew_ms < 0 || now_ms - e->last_renew_ms >= CTU_RENEW_GAP_MS)) {
+            SecureZeroMemory(token, sizeof(token));
+            e->last_renew_ms = now_ms;
+            e->renew(e->renew_ctx);
+            cred_mt = ctu_file_mtime(e->cred_path);
+            len = 0;
+            cred = ctu_read_file(e->cred_path, &len, NULL);
+            rc = ctu_cred_check(cred, len, now_ms, token, sizeof(token));
+            free_secure(cred, len);
+        }
         if (rc != CRED_OK) {
             SecureZeroMemory(token, sizeof(token));
             e->v.own_429 = 0;

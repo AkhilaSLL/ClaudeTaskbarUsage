@@ -17,6 +17,8 @@ void app_load_config(app_config *c);
 void app_save_config(const app_config *c);
 /* Sets the paths, the fetch function and the sample mode of an engine; loads last.json. */
 void app_setup_engine(const app_config *c, ctu_engine *e);
+/* The stop event that ends a running login renewal (the widget's worker); call before the worker starts. */
+void app_set_renew_stop(HANDLE stop);
 
 int widget_run(HINSTANCE inst, app_config *cfg);
 

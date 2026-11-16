@@ -25,6 +25,13 @@ typedef struct {
 /* Sends the request with the token. Fills res. The token must not be stored or logged. */
 typedef void (*ctu_fetch_fn)(void *ctx, const char *token, ctu_http_result *res);
 
+/* Renews an expired login (the real hook runs the Claude CLI, see renew.h). Returns when the renewal ended:
+ * done, failed or timed out. The engine reads the credentials file again afterwards. */
+typedef void (*ctu_renew_fn)(void *ctx);
+
+/* At most one renewal start in this time ("Refresh now" ignores it). */
+#define CTU_RENEW_GAP_MS (30LL * 60 * 1000)
+
 /* The part of the state that the UI shows (copied under a lock). */
 typedef struct {
     usage_t data;
@@ -62,6 +69,9 @@ typedef struct {
     int live_source;                    /* SRC_LIVE or SRC_SAMPLE */
     ctu_fetch_fn fetch;
     void *fetch_ctx;
+    ctu_renew_fn renew;                 /* NULL = no renewal */
+    void *renew_ctx;
+    long long last_renew_ms;            /* start of the last renewal (memory only), -1 = never */
 } ctu_engine;
 
 void engine_init(ctu_engine *e, int interval_min);

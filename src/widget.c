@@ -583,6 +583,7 @@ int widget_run(HINSTANCE inst, app_config *cfg)
     g.ev_stop = CreateEventW(NULL, TRUE, FALSE, NULL);
     g.ev_refresh = CreateEventW(NULL, FALSE, FALSE, NULL);
     g.ev_wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    app_set_renew_stop(g.ev_stop); /* "Exit" ends a running login renewal at once */
     g.thread = CreateThread(NULL, 0, worker, NULL, 0, NULL);
 
     SetTimer(g.ctl, TIMER_PLACE, PLACE_MS, NULL);

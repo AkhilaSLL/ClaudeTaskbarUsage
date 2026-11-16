@@ -12,6 +12,7 @@
 #include "../src/logo.h"
 #include "../src/logo_mask.h"
 #include "../src/render.h"
+#include "../src/renew.h"
 #include "../src/text_d2d.h"
 #include "../src/usage.h"
 
@@ -692,6 +693,267 @@ static void test_login_retry(void)
         CHECK(f.calls == 1 && e.v.note_kind == NOTE_NONE && e.v.have_data);
         DeleteFileW(e.cred_path);
     }
+}
+
+/* A renew hook that counts its calls and, when write_expires is set, rewrites the credentials file. */
+typedef struct {
+    int calls;
+    const wchar_t *path;
+    long long write_expires; /* 0 = change nothing */
+    long long write_ft;
+} fake_renew;
+
+static void fake_renew_fn(void *ctx)
+{
+    fake_renew *r = (fake_renew *)ctx;
+    r->calls++;
+    if (r->write_expires) write_cred(r->path, r->write_expires, r->write_ft);
+}
+
+static void renew_engine(ctu_engine *e, fake_http *f, fake_renew *r, const wchar_t *name, int interval)
+{
+    engine_init(e, interval);
+    _snwprintf(e->cred_path, CTU_PATH_MAX, L"%ls\\%ls", g_scratch, name);
+    e->fetch = fake_fetch;
+    e->fetch_ctx = f;
+    e->renew = fake_renew_fn;
+    e->renew_ctx = r;
+    r->path = e->cred_path;
+}
+
+/* Login renewal through the hook: only for an expired token in an existing file, at most once per 30 min. */
+static void test_renew(void)
+{
+    const char *normal = "{\"five_hour\":{\"utilization\":24.7,\"resets_at\":\"2030-01-01T00:00:00Z\"},"
+                         "\"seven_day\":{\"utilization\":82,\"resets_at\":null}}";
+    const long long M = CTU_MIN_MS, S = 1000;
+    const long long T = 1900000000000LL;
+    const long long FT1 = 133200000000000000LL, FT2 = 133200000100000000LL;
+    ctu_engine e;
+
+    /* Expired token, the hook writes a valid one: one hook call, one request, live data, no note. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, T + 1000 * M, FT2 };
+        renew_engine(&e, &f, &r, L"cred_rn1.json", 30);
+        write_cred(e.cred_path, T - M, FT1);
+        CHECK(engine_step(&e, T, 0) == 1);
+        CHECK(r.calls == 1 && f.calls == 1);
+        CHECK(e.v.note_kind == NOTE_NONE && !e.v.stale && e.v.have_data && e.v.source == SRC_LIVE);
+        CHECK(e.v.data_ms == T && e.v.data.five.pct == 24 && e.last_renew_ms == T);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Expired token, the hook changes nothing: NOTE_LOGIN; no second call 10 min later, one 31 min later. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, 0, 0 };
+        renew_engine(&e, &f, &r, L"cred_rn2.json", 5);
+        write_cred(e.cred_path, T - M, FT1);
+        CHECK(engine_step(&e, T, 0) == 1);
+        CHECK(r.calls == 1 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN && e.v.stale);
+        CHECK(engine_step(&e, T + 10 * M, 0) == 1);
+        CHECK(e.v.last_attempt_ms == T + 10 * M); /* the step reached the credential check */
+        CHECK(r.calls == 1 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        CHECK(engine_step(&e, T + 31 * M, 0) == 1);
+        CHECK(r.calls == 2 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* After a failed renewal, a later change of the file (valid token): a request without a new hook call. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, 0, 0 };
+        renew_engine(&e, &f, &r, L"cred_rn3.json", 30);
+        write_cred(e.cred_path, T - M, FT1);
+        engine_step(&e, T, 0);
+        CHECK(r.calls == 1 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        CHECK(engine_step(&e, T + 10 * S, 0) == 0); /* file unchanged: no retry */
+        write_cred(e.cred_path, T + 1000 * M, FT2);
+        CHECK(engine_step(&e, T + 20 * S, 0) == 1);
+        CHECK(r.calls == 1 && f.calls == 1);
+        CHECK(e.v.note_kind == NOTE_NONE && e.v.have_data && e.v.data_ms == T + 20 * S);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* "Refresh now" two minutes after a failed renewal: the hook is called again. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, 0, 0 };
+        renew_engine(&e, &f, &r, L"cred_rn4.json", 30);
+        write_cred(e.cred_path, T - M, FT1);
+        engine_step(&e, T, 0);
+        CHECK(r.calls == 1);
+        CHECK(engine_step(&e, T + 2 * M, 1) == 1);
+        CHECK(r.calls == 2 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Missing or unreadable file, HTTP 401: no hook call. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, T + 1000 * M, FT2 };
+        renew_engine(&e, &f, &r, L"cred_rn5.json", 5);
+        DeleteFileW(e.cred_path);
+        engine_step(&e, T, 1);
+        CHECK(r.calls == 0 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        write_text(e.cred_path, "not json");
+        engine_step(&e, T + 40 * M, 1);
+        CHECK(r.calls == 0 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        write_cred(e.cred_path, T + 1000 * M, FT1);
+        f.status = 401;
+        f.body = "{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"x\"}}";
+        engine_step(&e, T + 80 * M, 1);
+        CHECK(f.calls == 1 && r.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Hook NULL: as before (NOTE_LOGIN, no request). */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, T + 1000 * M, FT2 };
+        renew_engine(&e, &f, &r, L"cred_rn6.json", 5);
+        e.renew = NULL;
+        write_cred(e.cred_path, T - M, FT1);
+        CHECK(engine_step(&e, T, 1) == 1);
+        CHECK(r.calls == 0 && f.calls == 0 && e.v.note_kind == NOTE_LOGIN);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Sample mode (skip_credentials): no hook call, the request is sent. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, T + 1000 * M, FT2 };
+        renew_engine(&e, &f, &r, L"cred_rn7.json", 5);
+        e.skip_credentials = 1;
+        e.live_source = SRC_SAMPLE;
+        write_cred(e.cred_path, T - M, FT1);
+        engine_step(&e, T, 1);
+        CHECK(r.calls == 0 && f.calls == 1 && e.v.note_kind == NOTE_NONE && e.v.source == SRC_SAMPLE);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Backoff active: no hook call. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, T + 1000 * M, FT2 };
+        renew_engine(&e, &f, &r, L"cred_rn8.json", 5);
+        write_cred(e.cred_path, T - M, FT1);
+        e.v.bo.until_ms = T + 20 * M;
+        engine_step(&e, T, 1);
+        CHECK(r.calls == 0 && f.calls == 0 && strstr(e.v.hint, "rate limited until") != NULL);
+        engine_step(&e, T + 10 * M, 0);
+        CHECK(r.calls == 0 && f.calls == 0);
+        DeleteFileW(e.cred_path);
+    }
+
+    /* Inside the 5 minute minimum: no hook call; at the next due step the hook runs. */
+    {
+        fake_http f = { 0, 200, normal, "" };
+        fake_renew r = { 0, NULL, 0, 0 };
+        renew_engine(&e, &f, &r, L"cred_rn9.json", 5);
+        write_cred(e.cred_path, T + M, FT1); /* valid at T, expired from T + 1 min */
+        engine_step(&e, T, 0);
+        CHECK(f.calls == 1 && r.calls == 0 && e.v.note_kind == NOTE_NONE);
+        engine_step(&e, T + 2 * M, 1);
+        CHECK(r.calls == 0 && f.calls == 1 && strstr(e.v.hint, "next request allowed") != NULL);
+        engine_step(&e, T + 5 * M, 0);
+        CHECK(r.calls == 1 && f.calls == 1 && e.v.note_kind == NOTE_LOGIN);
+        DeleteFileW(e.cred_path);
+    }
+}
+
+/* The environment filter of the real renew hook. */
+static void test_env_filter(void)
+{
+    static const wchar_t in[] = L"=C:=C:\\x\0PATH=C:\\Windows\0CLAUDE_X=1\0claudecode=1\0ANTHROPIC_BASE_URL=http://x\0"
+                                L"USERPROFILE=C:\\Users\\u\0MYCLAUDE=2\0Claude=3\0";
+    static const wchar_t want[] = L"=C:=C:\\x\0PATH=C:\\Windows\0USERPROFILE=C:\\Users\\u\0MYCLAUDE=2\0";
+    wchar_t out[256];
+    CHECK(ctu_env_block_len(in) == sizeof(in) / sizeof(in[0]));
+    size_t n = ctu_env_filter(in, out, 256);
+    CHECK(n == sizeof(want) / sizeof(want[0]));
+    CHECK(n == sizeof(want) / sizeof(want[0]) && memcmp(out, want, sizeof(want)) == 0);
+    CHECK(n >= 2 && out[n - 1] == 0 && out[n - 2] == 0);
+    CHECK(ctu_env_block_len(out) == n);
+
+    /* Everything removed: an empty block (two NULs) is valid. */
+    static const wchar_t all[] = L"CLAUDE_A=1\0ANTHROPIC_B=2\0";
+    for (int i = 0; i < 8; i++) out[i] = L'#';
+    n = ctu_env_filter(all, out, 256);
+    CHECK(n == 2 && out[0] == 0 && out[1] == 0);
+    /* An empty input block. */
+    static const wchar_t none[] = L"";
+    for (int i = 0; i < 8; i++) out[i] = L'#';
+    CHECK(ctu_env_block_len(none) == 1);
+    n = ctu_env_filter(none, out, 256);
+    CHECK(n == 2 && out[0] == 0 && out[1] == 0);
+    /* Too small an output buffer. */
+    CHECK(ctu_env_filter(in, out, ctu_env_block_len(in)) == 0);
+}
+
+/* The real hook's inner function with hidden system programs (no window): exit, environment, working folder,
+ * time-out, stop event and the end of the process tree. Never claude.exe. */
+static void test_renew_run(void)
+{
+    wchar_t sys[MAX_PATH], cmd[1024], path[MAX_PATH + 64];
+    GetSystemDirectoryW(sys, MAX_PATH);
+
+    _snwprintf(cmd, 1024, L"\"%ls\\cmd.exe\" /d /c exit 0", sys);
+    CHECK(ctu_renew_run(cmd, g_scratch, NULL, 10000) == RENEW_EXITED);
+    CHECK(ctu_renew_run(L"\"C:\\nonexistent-ctu\\nope.exe\" mcp list", g_scratch, NULL, 10000) == RENEW_NOT_STARTED);
+    CHECK(ctu_renew_run(L"", g_scratch, NULL, 10000) == RENEW_NOT_STARTED);
+
+    /* Environment without CLAUDE* / ANTHROPIC*; the working folder is the given one. */
+    SetEnvironmentVariableW(L"CLAUDE_CTU_TEST", L"x1");
+    SetEnvironmentVariableW(L"anthropic_ctu_test", L"x2");
+    SetEnvironmentVariableW(L"MYCLAUDE_KEEP", L"x3");
+    _snwprintf(path, MAX_PATH + 64, L"%ls\\renew_env.txt", g_scratch);
+    DeleteFileW(path);
+    _snwprintf(cmd, 1024, L"\"%ls\\cmd.exe\" /d /c \"set > renew_env.txt & cd >> renew_env.txt\"", sys);
+    CHECK(ctu_renew_run(cmd, g_scratch, NULL, 10000) == RENEW_EXITED);
+    SetEnvironmentVariableW(L"CLAUDE_CTU_TEST", NULL);
+    SetEnvironmentVariableW(L"anthropic_ctu_test", NULL);
+    SetEnvironmentVariableW(L"MYCLAUDE_KEEP", NULL);
+    size_t len = 0;
+    char *txt = ctu_read_file(path, &len, NULL);
+    char scratch8[MAX_PATH * 3];
+    WideCharToMultiByte(CP_ACP, 0, g_scratch, -1, scratch8, sizeof(scratch8), NULL, NULL);
+    CHECK(txt != NULL);
+    if (txt) {
+        CHECK(strstr(txt, "CLAUDE_CTU_TEST=") == NULL);
+        CHECK(strstr(txt, "anthropic_ctu_test=") == NULL);
+        CHECK(strstr(txt, "MYCLAUDE_KEEP=x3") != NULL);
+        CHECK(strstr(txt, "SystemRoot=") != NULL);
+        CHECK(strstr(txt, scratch8) != NULL);
+    }
+    free(txt);
+    DeleteFileW(path);
+
+    /* Time-out: a short value ends the job. */
+    _snwprintf(cmd, 1024, L"\"%ls\\PING.EXE\" -n 30 127.0.0.1", sys);
+    ULONGLONG t0 = GetTickCount64();
+    CHECK(ctu_renew_run(cmd, g_scratch, NULL, 300) == RENEW_TIMEOUT);
+    CHECK(GetTickCount64() - t0 < 3000);
+
+    /* Stop event set: returns at once. */
+    HANDLE stop = CreateEventW(NULL, TRUE, TRUE, NULL);
+    t0 = GetTickCount64();
+    CHECK(ctu_renew_run(cmd, g_scratch, stop, 60000) == RENEW_STOPPED);
+    CHECK(GetTickCount64() - t0 < 1500);
+    CloseHandle(stop);
+
+    /* The tree: the direct child exits at once, its child (started with start /b) would write a marker after
+     * about 1 s; closing the job ends it, so the marker never appears. */
+    _snwprintf(path, MAX_PATH + 64, L"%ls\\renew_tree.txt", g_scratch);
+    DeleteFileW(path);
+    _snwprintf(cmd, 1024,
+               L"\"%ls\\cmd.exe\" /d /c start \"\" /b cmd.exe /d /c \"ping -n 2 127.0.0.1 >NUL & echo x>renew_tree.txt\"",
+               sys);
+    CHECK(ctu_renew_run(cmd, g_scratch, NULL, 10000) == RENEW_EXITED);
+    Sleep(2500);
+    CHECK(GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES);
+    DeleteFileW(path);
 }
 
 /* Fable weekly limit from the "limits" list (Brief 2). */
@@ -1448,6 +1710,9 @@ int main(int argc, char **argv)
     test_rules();
     test_engine();
     test_login_retry();
+    test_renew();
+    test_env_filter();
+    test_renew_run();
     test_fable();
     test_fable_saved();
     test_logo();

@@ -7,6 +7,10 @@
 
 #include "app.h"
 #include "http.h"
+#include "renew.h"
+
+/* The renew hook's context: one engine per process (the widget or --once). */
+static ctu_renew_ctx s_renew;
 
 static int env_w(const wchar_t *name, wchar_t *out, DWORD cap)
 {
@@ -55,6 +59,10 @@ void app_setup_engine(const app_config *c, ctu_engine *e)
         e->cred_path[CTU_PATH_MAX - 1] = 0;
         e->ccjson_path[CTU_PATH_MAX - 1] = 0;
     }
+    /* Test aid CTU_CRED_FILE: this file replaces the credentials file (also in sample mode, see below). */
+    wchar_t cred_file[CTU_PATH_MAX];
+    int have_cred_file = env_w(L"CTU_CRED_FILE", cred_file, CTU_PATH_MAX);
+    if (have_cred_file) wcscpy(e->cred_path, cred_file);
     e->fetch = ctu_http_fetch;
     e->fetch_ctx = NULL;
     if (c->data_dir[0]) {
@@ -64,10 +72,10 @@ void app_setup_engine(const app_config *c, ctu_engine *e)
     }
     if (c->sample_path[0]) {
         /* Test aid: the sample file replaces the network step; no token, no Claude Code cache,
-         * last.json is read but never written. */
+         * last.json is read but never written. With CTU_CRED_FILE the credential check (and the renewal) runs. */
         e->fetch = ctu_sample_fetch;
         e->fetch_ctx = (void *)c->sample_path;
-        e->skip_credentials = 1;
+        e->skip_credentials = have_cred_file ? 0 : 1;
         e->use_cc_cache = 0;
         e->live_source = SRC_SAMPLE;
         e->last_path[0] = 0;
@@ -82,6 +90,19 @@ void app_setup_engine(const app_config *c, ctu_engine *e)
         wchar_t appdata[CTU_PATH_MAX];
         if (env_w(L"APPDATA", appdata, CTU_PATH_MAX)) engine_default_ext_dirs(e, appdata);
     }
+    /* Login renewal through the Claude CLI. Test aid CTU_RENEW_CMD replaces the command line; "off" = none. */
+    memset(&s_renew, 0, sizeof(s_renew));
+    env_w(L"CTU_RENEW_CMD", s_renew.cmd, CTU_RENEW_CMD_MAX);
+    if (!e->skip_credentials && _wcsicmp(s_renew.cmd, L"off") != 0) {
+        wcscpy(s_renew.workdir, c->data_dir);
+        e->renew = ctu_renew_hook;
+        e->renew_ctx = &s_renew;
+    }
+}
+
+void app_set_renew_stop(HANDLE stop)
+{
+    s_renew.stop = stop;
 }
 
 /* --once <file>: one data step, one line of result text, exit 0 or 1. */
