@@ -13,6 +13,18 @@ Windows system DLLs). Idle: about 1 MB working set after start-up, about 4 MB pr
 with DirectWrite text (about 1.6 MB with the GDI fallback), no CPU between the 2 s placement
 check and the data step.
 
+## The same values in the Claude app: the `usage-line` mod
+
+The folder `mod/usage-line` holds a mod for Claude Code and the Claude desktop app. It shows
+`5h 23% | W 43% | F 41%` in the footer row below the prompt box. Install it with one line:
+
+    claude plugin install usage-line --marketplace AkhilaSLL/ClaudeTaskbarUsage
+
+In the desktop app: **+** next to the prompt box, **Plugins**, **Add marketplace** with
+`AkhilaSLL/ClaudeTaskbarUsage`, then **Add plugin**. The mod takes the `F` value from the last
+reading of this taskbar program, so `F` shows only while the program runs. Details:
+[mod/usage-line/README.md](mod/usage-line/README.md).
+
 ## Use
 
 - Hover: tooltip with each window ("5-hour: 24% used, resets 3:40 PM (in 2 h 13 min)"),

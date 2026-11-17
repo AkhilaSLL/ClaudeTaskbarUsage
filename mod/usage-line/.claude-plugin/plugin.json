@@ -1,0 +1,6 @@
+{
+  "name": "usage-line",
+  "version": "0.3.0",
+  "description": "Shows the plan usage (5-hour, weekly and Fable weekly windows) in the prompt footer.",
+  "types": "./types/index.d.ts"
+}

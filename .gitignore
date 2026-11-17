@@ -1,2 +1,6 @@
 # Build output (build.ps1)
 build/
+
+# Written by Claude Code when it loads the mod
+mod/usage-line/.claude-plugin/types/
+mod/usage-line/tsconfig.json

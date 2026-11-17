@@ -1,0 +1,12 @@
+{
+  "name": "claude-taskbar-usage",
+  "description": "The usage-line mod: Claude plan usage in the prompt footer of Claude Code and the Claude desktop app.",
+  "owner": { "name": "AkhilaSLL" },
+  "plugins": [
+    {
+      "name": "usage-line",
+      "source": "./mod/usage-line",
+      "description": "Shows the plan usage (5-hour, weekly and Fable weekly windows) in the prompt footer."
+    }
+  ]
+}
